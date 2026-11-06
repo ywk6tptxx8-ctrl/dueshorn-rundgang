@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Düshorn – 360°-Panoramen</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #2a2420; color: #eee6dc;
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  [hidden] { display: none !important; }
+  canvas { display: block; touch-action: none; }
+  #overlay { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: rgba(30, 25, 21, .92); z-index: 10; padding: 16px; box-sizing: border-box; overflow-y: auto; }
+  #panel { max-width: 560px; width: 100%; }
+  h1 { font-size: 1.7em; margin: 0 0 .4em; font-weight: 600; }
+  .wahl { display: flex; gap: 10px; flex-wrap: wrap; margin: 12px 0; }
+  button.b { flex: 1 1 150px; padding: 12px 14px; font: inherit; color: inherit; cursor: pointer;
+    background: #3b322b; border: 1px solid #7a6656; border-radius: 8px; }
+  button.b:hover, button.b.aktiv { background: #5a4a3c; border-color: #d8b48a; }
+  #status { min-height: 1.4em; font-size: .92em; }
+  #status.fehler { color: #ff8a7a; }
+  .hilfe { font-size: .88em; opacity: .85; margin-top: 12px; }
+  a { color: #d8b48a; }
+  #leiste { position: fixed; left: 10px; bottom: 10px; z-index: 5; display: flex; gap: 6px; flex-wrap: wrap; max-width: calc(100vw - 20px); }
+  #leiste button { padding: 6px 10px; font: inherit; font-size: .85em; color: inherit; background: rgba(30,25,21,.75);
+    border: 1px solid #7a6656; border-radius: 6px; cursor: pointer; }
+  #leiste button.aktiv { border-color: #d8b48a; background: #5a4a3c; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="overlay"><div id="panel">
+  <h1>Düshorn – 360°-Panoramen</h1>
+  <div>Fotorealistische Stereo-Panoramen (Cycles) von drei Standpunkten, je mit Fliesen überall oder Dielen im Wohnbereich.
+    Zum freien Herumlaufen: <a href="index.html">begehbarer Rundgang</a>.</div>
+  <div class="wahl" id="liste"></div>
+  <div id="status">Bitte ein Panorama wählen.</div>
+  <div class="wahl" id="startzeile" hidden>
+    <button class="b" id="desktopStart">Am Bildschirm ansehen</button>
+    <span id="vrplatz" style="flex:1 1 150px;display:flex"></span>
+  </div>
+  <div class="hilfe"><b>Quest:</b> umsehen durch Kopfdrehen · Trigger oder A: nächster Standpunkt · B: Fliesen/Dielen wechseln<br>
+    <b>Bildschirm:</b> ziehen zum Umsehen · Leertaste: nächster Standpunkt · F: Fliesen/Dielen · Esc: Menü</div>
+</div></div>
+<div id="leiste" hidden></div>
+
+<script type="module">
+import * as THREE from 'three';
+import { VRButton } from 'three/addons/webxr/VRButton.js';
+
+// Standpunkte (Blender-Panoramen, Stereo oben/unten: oben = linkes Auge)
+const ORTE = [
+  { id: 'stuetze_links', name: 'Neben der Stütze' },
+  { id: 'herd', name: 'Vor dem Kamin' },
+  { id: 'couch', name: 'Auf der Couch' },
+];
+const BOEDEN = { fliesen: 'Fliesen überall', dielen: 'Dielen im Wohnbereich' };
+const datei = (ort, boden) => `pano/${ort}_${boden}.jpg`;
+const $ = (s) => document.querySelector(s);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.NoToneMapping;
+renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType('local');
+document.body.prepend(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(75, innerWidth / innerHeight, 0.1, 200);
+camera.layers.enable(1);                 // am Bildschirm das linke Auge zeigen
+scene.add(camera);
+addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+
+// Zwei Kugeln (Ebene 1 = links, 2 = rechts), die in XR je einem Auge zugeordnet sind
+const geo = new THREE.SphereGeometry(50, 64, 40); geo.scale(-1, 1, 1);
+const matL = new THREE.MeshBasicMaterial(), matR = new THREE.MeshBasicMaterial();
+const kugelL = new THREE.Mesh(geo, matL); kugelL.layers.set(1); scene.add(kugelL);
+const kugelR = new THREE.Mesh(geo, matR); kugelR.layers.set(2); scene.add(kugelR);
+
+const lader = new THREE.TextureLoader(), cache = {};
+let ort = 0, boden = 'fliesen', ladeLaeuft = false;
+function texturen(url) {
+  if (!cache[url]) cache[url] = new Promise((ok, fail) => lader.load(url, (t) => {
+    t.colorSpace = THREE.SRGBColorSpace; t.minFilter = THREE.LinearFilter; t.generateMipmaps = false;
+    const l = t, r = t.clone();
+    l.repeat.set(1, 0.5); l.offset.set(0, 0.5);   // obere Hälfte
+    r.repeat.set(1, 0.5); r.offset.set(0, 0);     // untere Hälfte
+    l.needsUpdate = r.needsUpdate = true; ok([l, r]);
+  }, undefined, () => { delete cache[url]; fail(new Error(url + ' konnte nicht geladen werden')); }));
+  return cache[url];
+}
+function status(text, fehler = false) { const s = $('#status'); s.textContent = text; s.classList.toggle('fehler', fehler); }
+async function zeige(neuOrt, neuBoden) {
+  if (ladeLaeuft) return; ladeLaeuft = true;
+  const url = datei(ORTE[neuOrt].id, neuBoden);
+  status(`Lade ${ORTE[neuOrt].name} (${BOEDEN[neuBoden]}) …`);
+  try {
+    const [l, r] = await texturen(url);
+    matL.map = l; matR.map = r; matL.needsUpdate = matR.needsUpdate = true;
+    ort = neuOrt; boden = neuBoden;
+    status(`${ORTE[ort].name} · ${BOEDEN[boden]}`);
+    $('#startzeile').hidden = false; markiere();
+  } catch (e) { console.error(e); status(e.message, true); }
+  ladeLaeuft = false;
+}
+const naechster = () => zeige((ort + 1) % ORTE.length, boden);
+const bodenWechsel = () => zeige(ort, boden === 'fliesen' ? 'dielen' : 'fliesen');
+
+// Auswahl im Overlay und kleine Leiste unten
+const liste = $('#liste'), leiste = $('#leiste');
+for (const b of ['fliesen', 'dielen']) ORTE.forEach((o, i) => {
+  const mk = (cls) => Object.assign(document.createElement('button'), { textContent: `${o.name} · ${BOEDEN[b]}`, className: cls });
+  const b1 = mk('b'), b2 = mk('');
+  b1.dataset.key = b2.dataset.key = `${i}_${b}`;
+  b1.onclick = b2.onclick = () => zeige(i, b);
+  liste.append(b1); leiste.append(b2);
+});
+function markiere() { document.querySelectorAll('[data-key]').forEach((e) => e.classList.toggle('aktiv', e.dataset.key === `${ort}_${boden}`)); }
+const p = new URLSearchParams(location.search);
+if (p.get('ort') || p.get('boden')) zeige(Math.max(0, ORTE.findIndex((o) => o.id === p.get('ort'))), BOEDEN[p.get('boden')] ? p.get('boden') : 'fliesen');
+
+// VR-Button
+const vrBtn = VRButton.createButton(renderer);
+Object.assign(vrBtn.style, { position: 'static', left: 'auto', bottom: 'auto', width: '100%', flex: '1', padding: '12px 6px' });
+$('#vrplatz').append(vrBtn);
+$('#desktopStart').onclick = () => { $('#overlay').hidden = true; leiste.hidden = false; };
+renderer.xr.addEventListener('sessionstart', () => { $('#overlay').hidden = true; });
+addEventListener('keydown', (e) => {
+  if (e.code === 'Space') naechster();
+  if (e.code === 'KeyF') bodenWechsel();
+  if (e.code === 'Escape') { $('#overlay').hidden = false; leiste.hidden = true; }
+});
+
+// Bildschirm: ziehen zum Umsehen
+let lon = 0, lat = 0, zieh = null;
+const cv = renderer.domElement;
+cv.addEventListener('pointerdown', (e) => { zieh = { x: e.clientX, y: e.clientY, lon, lat }; });
+addEventListener('pointerup', () => (zieh = null));
+addEventListener('pointermove', (e) => {
+  if (!zieh) return;
+  lon = zieh.lon - (e.clientX - zieh.x) * 0.15; lat = THREE.MathUtils.clamp(zieh.lat + (e.clientY - zieh.y) * 0.15, -85, 85);
+});
+
+// XR-Controller: Trigger/A = nächster Standpunkt, B = Boden
+const prev = [{}, {}];
+function xrTasten() {
+  const s = renderer.xr.getSession(); if (!s) return;
+  let i = 0;
+  for (const src of s.inputSources) {
+    const gp = src.gamepad; if (!gp) continue;
+    const pr = prev[i++] || {};
+    const neu = (k) => gp.buttons[k]?.pressed && !pr[k];
+    if (neu(0) || neu(4)) naechster();
+    if (neu(5)) bodenWechsel();
+    gp.buttons.forEach((b, k) => (pr[k] = b.pressed));
+  }
+}
+
+renderer.setAnimationLoop(() => {
+  if (renderer.xr.isPresenting) xrTasten();
+  else {
+    const phi = THREE.MathUtils.degToRad(90 - lat), theta = THREE.MathUtils.degToRad(lon);
+    camera.lookAt(Math.sin(phi) * Math.cos(theta), Math.cos(phi), Math.sin(phi) * Math.sin(theta));
+  }
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>

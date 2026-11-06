@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Düshorn – Rundgang</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #2a2420; color: #eee6dc;
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  [hidden] { display: none !important; }
+  canvas { display: block; touch-action: none; }
+  #overlay { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: rgba(30, 25, 21, .92); z-index: 10; padding: 16px; box-sizing: border-box; overflow-y: auto; }
+  #panel { max-width: 560px; width: 100%; }
+  h1 { font-size: 1.7em; margin: 0 0 .4em; font-weight: 600; }
+  .wahl { display: flex; gap: 10px; flex-wrap: wrap; margin: 12px 0; }
+  button.b { flex: 1 1 200px; padding: 12px 14px; font: inherit; color: inherit; cursor: pointer;
+    background: #3b322b; border: 1px solid #7a6656; border-radius: 8px; }
+  button.b:hover, button.b.aktiv { background: #5a4a3c; border-color: #d8b48a; }
+  button.b:disabled { opacity: .5; cursor: default; }
+  #balken { height: 8px; background: #3b322b; border-radius: 4px; overflow: hidden; margin: 10px 0 4px; }
+  #balken div { height: 100%; width: 0; background: #d8b48a; transition: width .15s; }
+  #status { min-height: 1.4em; font-size: .92em; }
+  #status.fehler { color: #ff8a7a; white-space: pre-wrap; }
+  .hilfe { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 18px; font-size: .88em; opacity: .85; margin-top: 12px; }
+  .hilfe b { display: block; margin-bottom: 2px; }
+  @media (max-width: 520px) { .hilfe { grid-template-columns: 1fr; } }
+  #xrhinweis { font-size: .88em; color: #ffc98a; margin-top: 8px; }
+  #toast { position: fixed; left: 50%; top: 14px; transform: translateX(-50%); z-index: 20; padding: 6px 14px;
+    background: rgba(30, 25, 21, .85); border-radius: 6px; font-size: .9em; pointer-events: none;
+    opacity: 0; transition: opacity .3s; max-width: 90vw; }
+  #info { position: fixed; left: 10px; bottom: 10px; z-index: 5; font-size: .8em; opacity: .7;
+    background: rgba(30, 25, 21, .6); padding: 4px 8px; border-radius: 4px; pointer-events: none; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="overlay"><div id="panel">
+  <h1>Düshorn – Rundgang</h1>
+  <div>Bodenvariante wählen:</div>
+  <div class="wahl">
+    <button class="b" data-boden="fliesen">Fliesen überall</button>
+    <button class="b" data-boden="dielen">Dielen im Wohnbereich</button>
+  </div>
+  <div id="balken"><div></div></div>
+  <div id="status">Bitte eine Variante wählen.</div>
+  <div class="wahl" id="startzeile" hidden>
+    <button class="b" id="desktopStart">Am Bildschirm starten</button>
+    <span id="vrplatz" style="flex:1 1 200px;display:flex"></span>
+  </div>
+  <div id="xrhinweis" hidden></div>
+  <div style="margin-top:10px;font-size:.92em">Fotorealistisch, aber ohne Laufen: <a href="panoramen.html" style="color:#d8b48a">360°-Panoramen (Stereo)</a></div>
+  <div class="hilfe">
+    <div><b>Quest</b>Linker Stick: gehen · Rechter Stick: drehen (30°)<br>
+      Trigger halten: Teleport-Bogen, loslassen: springen<br>A: zurück zum Start · B: Boden wechseln</div>
+    <div><b>Bildschirm</b>Ins Bild klicken (oder ziehen): umsehen<br>
+      WASD / Pfeile: gehen · Q / E: drehen<br>F: Boden wechseln · R: Start · Esc: Maus frei</div>
+  </div>
+</div></div>
+<div id="toast"></div>
+<div id="info" hidden>WASD gehen · Maus umsehen · Q/E drehen · F Boden · R Start</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+import { VRButton } from 'three/addons/webxr/VRButton.js';
+import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
+
+// ---------- Konstanten ----------
+const DATEIEN = { fliesen: 'szene_fliesen.glb', dielen: 'szene_dielen.glb' };
+const NAMEN = { fliesen: 'Fliesen überall', dielen: 'Dielen im Wohnbereich' };
+const START = { x: 0.8, z: -5.47, yaw: -Math.PI / 2 };   // Tür C, Blick nach +x (Blender +x)
+const AUGE_DESKTOP = 1.6, GEH_V = 1.5, SNAP = Math.PI / 6, DREH_V = 1.6;
+const $ = (s) => document.querySelector(s);
+
+// ---------- Renderer / Szene ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.NoToneMapping;
+renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType('local-floor');
+renderer.xr.setFramebufferScaleFactor(1.0);
+renderer.xr.setFoveation(1);
+document.body.prepend(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x2a2420);
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.05, 100);
+camera.position.y = AUGE_DESKTOP;
+const rig = new THREE.Group();          // Spieler: enthält Kamera + Controller
+rig.add(camera);
+scene.add(rig);
+let pitch = 0;
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ---------- Hinweise (DOM + Text-Tafel vor dem Kopf in VR) ----------
+const hudCanvas = Object.assign(document.createElement('canvas'), { width: 512, height: 96 });
+const hudTex = new THREE.CanvasTexture(hudCanvas); hudTex.colorSpace = THREE.SRGBColorSpace;
+const hud = new THREE.Mesh(new THREE.PlaneGeometry(0.8, 0.15),
+  new THREE.MeshBasicMaterial({ map: hudTex, transparent: true, depthTest: false }));
+hud.position.set(0, -0.15, -1.2); hud.renderOrder = 999; hud.visible = false; camera.add(hud);
+let toastTimer;
+function toast(text, ms = 2500) {
+  const t = $('#toast'); t.textContent = text; t.style.opacity = 1;
+  const c = hudCanvas.getContext('2d'); c.clearRect(0, 0, 512, 96);
+  c.fillStyle = 'rgba(30,25,21,.85)'; c.beginPath(); c.roundRect(0, 0, 512, 96, 18); c.fill();
+  c.fillStyle = '#eee6dc'; c.font = '34px system-ui, sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText(text, 256, 48, 490); hudTex.needsUpdate = true;
+  hud.visible = renderer.xr.isPresenting;
+  clearTimeout(toastTimer);
+  if (ms) toastTimer = setTimeout(() => { t.style.opacity = 0; hud.visible = false; }, ms);
+}
+function status(text, fehler = false) { const s = $('#status'); s.textContent = text; s.classList.toggle('fehler', fehler); }
+
+// ---------- Laden (GLTF + Draco), Materialien -> MeshBasicMaterial ----------
+const draco = new DRACOLoader().setDecoderPath('https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/libs/draco/gltf/');
+const loader = new GLTFLoader().setDRACOLoader(draco);
+const varianten = {};                   // name -> Promise<{ root, begehbar[] }>  (Cache)
+let aktuell = null, aktuellName = null, wechselLaeuft = false;
+
+function zuBasic(m) {
+  if (m.map) m.map.colorSpace = THREE.SRGBColorSpace;
+  const b = new THREE.MeshBasicMaterial({
+    name: m.name, map: m.map || null, color: m.color ? m.color.clone() : 0xffffff,
+    transparent: m.transparent, opacity: m.opacity, side: m.side, alphaTest: m.alphaTest,
+    vertexColors: m.vertexColors, depthWrite: m.transparent ? false : m.depthWrite,
+  });
+  m.dispose(); return b;
+}
+
+function ladeVariante(name, onProg) {
+  if (!varianten[name]) varianten[name] = new Promise((ok, fail) => {
+    loader.load(DATEIEN[name], (gltf) => {
+      const root = gltf.scene, ziele = [];
+      root.traverse((o) => {
+        if (!o.isMesh) return;
+        o.material = Array.isArray(o.material) ? o.material.map(zuBasic) : zuBasic(o.material);
+        const mats = [].concat(o.material);
+        if (!mats.every((m) => m.transparent && m.opacity < 0.5)) ziele.push(o);  // Glas nicht anvisieren
+      });
+      ok({ root, ziele });
+    }, (e) => onProg && onProg(e), (err) => {
+      delete varianten[name];
+      fail(new Error(`${DATEIEN[name]}: ${err?.message || err?.target?.statusText || 'unbekannter Fehler'}`));
+    });
+  });
+  return varianten[name];
+}
+
+function fortschritt(e) {
+  const mb = (e.loaded / 1048576).toFixed(1);
+  if (e.lengthComputable && e.total) {
+    const p = Math.round(100 * e.loaded / e.total);
+    $('#balken div').style.width = p + '%'; return `${p} % (${mb} MB)`;
+  }
+  $('#balken div').style.width = '50%'; return `${mb} MB`;
+}
+
+function zeige(name, v) {
+  if (aktuell) scene.remove(aktuell.root);
+  aktuell = v; aktuellName = name; scene.add(v.root);
+}
+
+// Bodenvariante wechseln; Spielerposition bleibt (beide GLBs haben dieselben Koordinaten)
+async function wechsleBoden() {
+  if (!aktuell || wechselLaeuft) return;
+  wechselLaeuft = true;
+  const ziel = aktuellName === 'fliesen' ? 'dielen' : 'fliesen';
+  try {
+    toast(`Lade ${NAMEN[ziel]} …`, 0);
+    const v = await ladeVariante(ziel, (e) => toast(`Lade ${NAMEN[ziel]} … ${fortschritt(e)}`, 0));
+    zeige(ziel, v); toast(NAMEN[ziel]);
+  } catch (err) { console.error(err); toast('Fehler: ' + err.message, 6000); }
+  wechselLaeuft = false;
+}
+
+// ---------- Start-Overlay ----------
+async function starte(name) {
+  document.querySelectorAll('[data-boden]').forEach((b) => { b.disabled = true; b.classList.toggle('aktiv', b.dataset.boden === name); });
+  status(`Lade ${NAMEN[name]} …`);
+  try {
+    const v = await ladeVariante(name, (e) => status(`Lade ${NAMEN[name]} … ${fortschritt(e)}`));
+    $('#balken div').style.width = '100%';
+    zeige(name, v); geheZuStart();
+    status(`${NAMEN[name]} geladen.`);
+    $('#startzeile').hidden = false;
+  } catch (err) {
+    console.error(err);
+    status(`Laden fehlgeschlagen:\n${err.message}\nLiegt die Datei neben der index.html?`, true);
+    document.querySelectorAll('[data-boden]').forEach((b) => (b.disabled = false));
+  }
+}
+document.querySelectorAll('[data-boden]').forEach((b) => b.addEventListener('click', () => starte(b.dataset.boden)));
+const urlBoden = new URLSearchParams(location.search).get('boden');
+if (urlBoden && DATEIEN[urlBoden]) starte(urlBoden);
+
+// VR-Button + WebXR-Prüfung
+const vrBtn = VRButton.createButton(renderer);
+Object.assign(vrBtn.style, { position: 'static', left: 'auto', bottom: 'auto', width: '100%', flex: '1', padding: '12px 6px' });
+$('#vrplatz').append(vrBtn);
+(async () => {
+  let ok = false;
+  try { ok = !!navigator.xr && await navigator.xr.isSessionSupported('immersive-vr'); } catch (e) {}
+  if (!ok) {
+    const h = $('#xrhinweis'); h.hidden = false;
+    h.textContent = window.isSecureContext
+      ? 'WebXR/VR ist in diesem Browser nicht verfügbar – der Bildschirm-Modus funktioniert trotzdem. Für VR die Seite im Browser der Quest öffnen.'
+      : 'WebXR braucht HTTPS – der Bildschirm-Modus funktioniert trotzdem.';
+  }
+})();
+
+function sperreMaus() { try { renderer.domElement.requestPointerLock()?.catch?.(() => {}); } catch (e) {} }
+function zeigeSzene() { $('#overlay').hidden = true; $('#info').hidden = false; }
+$('#desktopStart').addEventListener('click', () => { zeigeSzene(); sperreMaus(); });
+renderer.xr.addEventListener('sessionstart', () => { zeigeSzene(); renderer.xr.setFoveation(1); geheZuStart(); });
+renderer.xr.addEventListener('sessionend', () => {
+  camera.position.set(0, AUGE_DESKTOP, 0); camera.quaternion.identity(); pitch = 0; hud.visible = false;
+});
+
+// ---------- Spieler-Bewegung (Kopf-kompensiert, damit es in VR wie am Desktop wirkt) ----------
+const v1 = new THREE.Vector3(), v2 = new THREE.Vector3();
+const kopfWelt = (out) => rig.localToWorld(out.copy(camera.position));
+function setzeKopfAuf(x, z) {           // verschiebt Rig so, dass der Kopf über (x, z) steht
+  rig.updateMatrixWorld(); kopfWelt(v1);
+  rig.position.x += x - v1.x; rig.position.z += z - v1.z; rig.position.y = 0;
+}
+function drehe(winkel) {                 // dreht um den Kopf, nicht um den Rig-Ursprung
+  rig.updateMatrixWorld(); kopfWelt(v1);
+  rig.rotation.y += winkel; rig.updateMatrixWorld(); kopfWelt(v2);
+  rig.position.x += v1.x - v2.x; rig.position.z += v1.z - v2.z;
+}
+function geheZuStart() {
+  rig.rotation.set(0, START.yaw, 0);
+  if (renderer.xr.isPresenting) {        // Kopf-Blickrichtung mit einrechnen
+    v1.set(0, 0, -1).applyQuaternion(camera.quaternion);
+    rig.rotation.y = START.yaw - Math.atan2(-v1.x, -v1.z);
+  } else pitch = 0;
+  setzeKopfAuf(START.x, START.z);
+}
+function gleite(vor, seit, dt) {         // horizontal, relativ zur Kopf-Blickrichtung
+  camera.getWorldDirection(v1); v1.y = 0;
+  if (v1.lengthSq() < 1e-6) return; v1.normalize();
+  v2.set(-v1.z, 0, v1.x);                // rechts
+  rig.position.addScaledVector(v1, vor * GEH_V * dt).addScaledVector(v2, seit * GEH_V * dt);
+  rig.position.y = 0;                    // konstante Höhe, kein Hochlaufen auf Möbel
+}
+
+// ---------- Desktop-Steuerung ----------
+const tasten = new Set();
+addEventListener('keydown', (e) => {
+  if (e.repeat) return; tasten.add(e.code);
+  if (e.code === 'KeyF') wechsleBoden();
+  if (e.code === 'KeyR') geheZuStart();
+});
+addEventListener('keyup', (e) => tasten.delete(e.code));
+addEventListener('blur', () => tasten.clear());
+const cv = renderer.domElement;
+let ziehen = null;
+function schau(dx, dy) {
+  rig.rotation.y -= dx * 0.0025;
+  pitch = THREE.MathUtils.clamp(pitch - dy * 0.0025, -1.4, 1.4);
+}
+cv.addEventListener('click', () => { if (!renderer.xr.isPresenting && document.pointerLockElement !== cv) sperreMaus(); });
+addEventListener('mousemove', (e) => { if (document.pointerLockElement === cv) schau(e.movementX, e.movementY); });
+// Fallback ohne PointerLock (z. B. eingebettet/Touch): Ziehen zum Umsehen
+cv.addEventListener('pointerdown', (e) => { ziehen = { x: e.clientX, y: e.clientY }; });
+addEventListener('pointerup', () => (ziehen = null));
+addEventListener('pointermove', (e) => {
+  if (!ziehen || document.pointerLockElement === cv) return;
+  schau(e.clientX - ziehen.x, e.clientY - ziehen.y); ziehen = { x: e.clientX, y: e.clientY };
+});
+
+function desktopUpdate(dt) {
+  const k = (c) => tasten.has(c) ? 1 : 0;
+  const vor = k('KeyW') + k('ArrowUp') - k('KeyS') - k('ArrowDown');
+  const seit = k('KeyD') + k('ArrowRight') - k('KeyA') - k('ArrowLeft');
+  rig.rotation.y += (k('KeyQ') - k('KeyE')) * DREH_V * dt;
+  camera.rotation.set(pitch, 0, 0);
+  if (vor || seit) {                     // am Desktop nach Körper-Yaw, nicht nach Pitch
+    const y = rig.rotation.y; v1.set(-Math.sin(y), 0, -Math.cos(y)); v2.set(-v1.z, 0, v1.x);
+    const n = Math.hypot(vor, seit);
+    rig.position.addScaledVector(v1, vor / n * GEH_V * dt).addScaledVector(v2, seit / n * GEH_V * dt);
+  }
+}
+
+// ---------- XR-Controller ----------
+const modelle = new XRControllerModelFactory();
+const hand = {};                         // 'left'/'right' -> { ctrl, prev:[], snapBereit }
+for (let i = 0; i < 2; i++) {
+  const ctrl = renderer.xr.getController(i);
+  ctrl.addEventListener('connected', (e) => {
+    if (e.data.hand) return;             // Handtracking ignorieren
+    ctrl.userData.hand = e.data.handedness;
+    hand[e.data.handedness] = { ctrl, prev: [], snapBereit: true, zielt: false };
+  });
+  ctrl.addEventListener('disconnected', () => { if (hand[ctrl.userData.hand]?.ctrl === ctrl) delete hand[ctrl.userData.hand]; });
+  rig.add(ctrl);
+  const grip = renderer.xr.getControllerGrip(i);
+  grip.add(modelle.createControllerModel(grip));
+  rig.add(grip);
+}
+
+// Teleport-Bogen + Marker-Ring
+const BOGEN_N = 40;
+const bogenGeo = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(BOGEN_N * 3), 3));
+const bogenMat = new THREE.LineBasicMaterial({ color: 0x8fe08f });
+const bogen = new THREE.Line(bogenGeo, bogenMat); bogen.frustumCulled = false; bogen.visible = false; scene.add(bogen);
+const ring = new THREE.Mesh(new THREE.RingGeometry(0.2, 0.26, 40).rotateX(-Math.PI / 2),
+  new THREE.MeshBasicMaterial({ color: 0x8fe08f, transparent: true, opacity: 0.9, depthWrite: false }));
+ring.visible = false; scene.add(ring);
+const ray = new THREE.Raycaster(), nWelt = new THREE.Vector3();
+let teleportZiel = null;
+
+function istBegehbar(hit) {
+  for (let o = hit.object; o; o = o.parent) if (/^(Boden|Parkett)/.test(o.name)) return true;
+  if (!hit.face) return false;
+  nWelt.copy(hit.face.normal).transformDirection(hit.object.matrixWorld);
+  return nWelt.y > 0.8 && hit.point.y < 0.3;
+}
+
+function zeichneBogen(ctrl) {            // ballistischer Bogen, Segment-Raycasts gegen die Szene
+  const pos = bogenGeo.attributes.position.array;
+  const p = new THREE.Vector3().setFromMatrixPosition(ctrl.matrixWorld);
+  const vel = new THREE.Vector3(0, 0, -1).transformDirection(ctrl.matrixWorld).multiplyScalar(7);
+  const g = new THREE.Vector3(0, -9.8, 0), q = new THREE.Vector3(), dt = 0.03;
+  let n = 0, hit = null;
+  pos[0] = p.x; pos[1] = p.y; pos[2] = p.z; n = 1;
+  for (; n < BOGEN_N && !hit; n++) {
+    q.copy(p).addScaledVector(vel, dt); vel.addScaledVector(g, dt);
+    const d = v1.subVectors(q, p), len = d.length();
+    ray.set(p, d.divideScalar(len)); ray.far = len;
+    const h = ray.intersectObjects(aktuell ? aktuell.ziele : [], false)[0];
+    if (h) { hit = h; q.copy(h.point); }
+    pos[n * 3] = q.x; pos[n * 3 + 1] = q.y; pos[n * 3 + 2] = q.z; p.copy(q);
+    if (p.y < -5) break;
+  }
+  bogenGeo.setDrawRange(0, n); bogenGeo.attributes.position.needsUpdate = true;
+  const ok = hit && istBegehbar(hit);
+  bogenMat.color.set(ok ? 0x8fe08f : 0xe07a6a); bogen.visible = true;
+  ring.visible = !!ok; if (ok) ring.position.copy(hit.point).setY(hit.point.y + 0.01);
+  return ok ? hit.point.clone() : null;
+}
+
+function xrUpdate(dt) {
+  const session = renderer.xr.getSession();
+  let zielt = false;
+  for (const src of session.inputSources) {
+    const gp = src.gamepad, h = hand[src.handedness];
+    if (!gp || !h) continue;
+    const ax = gp.axes, sx = ax[2] ?? ax[0] ?? 0, sy = ax[3] ?? ax[1] ?? 0;
+    const btn = (i) => !!gp.buttons[i]?.pressed, neu = (i) => btn(i) && !h.prev[i];
+    const tot = (v) => Math.abs(v) < 0.15 ? 0 : v;
+    if (src.handedness === 'left') {
+      gleite(-tot(sy), tot(sx), dt);
+    } else if (src.handedness === 'right') {
+      if (h.snapBereit && Math.abs(sx) > 0.7) { drehe(-Math.sign(sx) * SNAP); h.snapBereit = false; }
+      else if (Math.abs(sx) < 0.3) h.snapBereit = true;
+      if (neu(4)) geheZuStart();         // A
+      if (neu(5)) wechsleBoden();        // B
+    }
+    // Trigger (beide Hände): halten = zielen, loslassen = teleportieren
+    if (btn(0) && !zielt) { teleportZiel = zeichneBogen(h.ctrl); h.zielt = zielt = true; }
+    else if (!btn(0) && h.zielt) { h.zielt = false; if (teleportZiel) setzeKopfAuf(teleportZiel.x, teleportZiel.z); teleportZiel = null; }
+    h.prev = gp.buttons.map((b) => b.pressed);
+  }
+  if (!zielt) { bogen.visible = ring.visible = false; }
+}
+
+window.rundgang = { rig, camera, scene, renderer, zeichneBogen, setzeKopfAuf, drehe };   // zum Debuggen in der Konsole
+
+// ---------- Hauptschleife ----------
+const uhr = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(uhr.getDelta(), 0.1);
+  if (renderer.xr.isPresenting) xrUpdate(dt); else desktopUpdate(dt);
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
