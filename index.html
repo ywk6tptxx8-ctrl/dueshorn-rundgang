@@ -57,9 +57,10 @@
   <div style="margin-top:10px;font-size:.92em">Fotorealistisch, aber ohne Laufen: <a href="panoramen.html" style="color:#d8b48a">360°-Panoramen (Stereo)</a></div>
   <div class="hilfe">
     <div><b>Quest</b>Linker Stick: gehen · Rechter Stick: drehen (30°)<br>
-      Trigger halten: Teleport-Bogen, loslassen: springen<br>A: zurück zum Start · B: Boden wechseln</div>
+      Trigger halten: Teleport-Bogen, loslassen: springen<br>A: zurück zum Start · B: Boden wechseln<br>
+      Rechter Stick hoch/runter: Augenhöhe (bleibt gespeichert)</div>
     <div><b>Bildschirm</b>Ins Bild klicken (oder ziehen): umsehen<br>
-      WASD / Pfeile: gehen · Q / E: drehen<br>F: Boden wechseln · R: Start · Esc: Maus frei</div>
+      WASD / Pfeile: gehen · Q / E: drehen<br>F: Boden wechseln · R: Start · Esc: Maus frei<br>+ / −: Augenhöhe</div>
   </div>
 </div></div>
 <div id="toast"></div>
@@ -78,6 +79,13 @@ const NAMEN = { fliesen: 'Fliesen überall', dielen: 'Dielen im Wohnbereich' };
 const START = { x: 0.8, z: -5.47, yaw: -Math.PI / 2 };   // Tür C, Blick nach +x (Blender +x)
 const AUGE_DESKTOP = 1.6, GEH_V = 1.5, SNAP = Math.PI / 6, DREH_V = 1.6;
 const $ = (s) => document.querySelector(s);
+// Augenhöhen-Korrektur in Metern (negativ = tiefer). URL ?hoehe=-0.15 hat Vorrang, sonst gespeicherter Wert.
+let hoehe = 0;
+try {
+  const u = parseFloat(new URLSearchParams(location.search).get('hoehe'));
+  hoehe = Number.isFinite(u) ? u : (parseFloat(localStorage.getItem('rundgang_hoehe')) || 0);
+} catch (e) {}
+hoehe = Math.max(-1, Math.min(1, hoehe));
 
 // ---------- Renderer / Szene ----------
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
@@ -234,7 +242,14 @@ const v1 = new THREE.Vector3(), v2 = new THREE.Vector3();
 const kopfWelt = (out) => rig.localToWorld(out.copy(camera.position));
 function setzeKopfAuf(x, z) {           // verschiebt Rig so, dass der Kopf über (x, z) steht
   rig.updateMatrixWorld(); kopfWelt(v1);
-  rig.position.x += x - v1.x; rig.position.z += z - v1.z; rig.position.y = 0;
+  rig.position.x += x - v1.x; rig.position.z += z - v1.z; rig.position.y = hoehe;
+}
+function aendereHoehe(d) {               // Augenhöhe anpassen (Rechter Stick hoch/runter, Tasten + / −)
+  hoehe = Math.round(Math.max(-1, Math.min(1, hoehe + d)) * 100) / 100;
+  rig.position.y = hoehe;
+  try { localStorage.setItem('rundgang_hoehe', hoehe); } catch (e) {}
+  const auge = camera.position.y + hoehe;
+  toast(`Augenhöhe ${auge.toFixed(2)} m (${hoehe >= 0 ? '+' : '−'}${Math.round(Math.abs(hoehe) * 100)} cm)`);
 }
 function drehe(winkel) {                 // dreht um den Kopf, nicht um den Rig-Ursprung
   rig.updateMatrixWorld(); kopfWelt(v1);
@@ -254,7 +269,7 @@ function gleite(vor, seit, dt) {         // horizontal, relativ zur Kopf-Blickri
   if (v1.lengthSq() < 1e-6) return; v1.normalize();
   v2.set(-v1.z, 0, v1.x);                // rechts
   rig.position.addScaledVector(v1, vor * GEH_V * dt).addScaledVector(v2, seit * GEH_V * dt);
-  rig.position.y = 0;                    // konstante Höhe, kein Hochlaufen auf Möbel
+  rig.position.y = hoehe;                // konstante Höhe, kein Hochlaufen auf Möbel
 }
 
 // ---------- Desktop-Steuerung ----------
@@ -263,6 +278,8 @@ addEventListener('keydown', (e) => {
   if (e.repeat) return; tasten.add(e.code);
   if (e.code === 'KeyF') wechsleBoden();
   if (e.code === 'KeyR') geheZuStart();
+  if (e.code === 'Equal' || e.code === 'NumpadAdd' || e.code === 'PageUp') aendereHoehe(0.05);
+  if (e.code === 'Minus' || e.code === 'NumpadSubtract' || e.code === 'PageDown') aendereHoehe(-0.05);
 });
 addEventListener('keyup', (e) => tasten.delete(e.code));
 addEventListener('blur', () => tasten.clear());
@@ -367,6 +384,9 @@ function xrUpdate(dt) {
     } else if (src.handedness === 'right') {
       if (h.snapBereit && Math.abs(sx) > 0.7) { drehe(-Math.sign(sx) * SNAP); h.snapBereit = false; }
       else if (Math.abs(sx) < 0.3) h.snapBereit = true;
+      // Stick hoch/runter: Augenhöhe in 5-cm-Schritten (Stick nach unten = tiefer)
+      if (h.hoeheBereit !== false && Math.abs(sy) > 0.7 && Math.abs(sx) < 0.5) { aendereHoehe(-Math.sign(sy) * 0.05); h.hoeheBereit = false; }
+      else if (Math.abs(sy) < 0.3) h.hoeheBereit = true;
       if (neu(4)) geheZuStart();         // A
       if (neu(5)) wechsleBoden();        // B
     }
